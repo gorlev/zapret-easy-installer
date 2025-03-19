@@ -3,6 +3,7 @@
 # Zapret Easy Installer Script
 # Supports: OpenWrt, Linux, macOS, Windows (via separate installer)
 # Features:
+# - Self-elevating (handles OpenWrt without sudo and other systems with sudo)
 # - Checks for root/admin privileges
 # - Installs curl if not available
 # - Detects OS type (OpenWrt, Linux, macOS, Windows)
@@ -11,6 +12,27 @@
 # - Extracts and installs the package
 # - Cleans up after installation
 #
+
+# Self-elevation mechanism - try to run as root if not already
+if [ "$(id -u 2>/dev/null)" != "0" ]; then
+    # Check if this is OpenWrt (which typically doesn't have sudo)
+    if [ -f "/etc/openwrt_release" ] || grep -q 'OpenWrt' /etc/os-release 2>/dev/null; then
+        echo "OpenWrt detected, continuing without sudo..."
+    else
+        # Not OpenWrt, so we need root. Try to use sudo to re-execute this script
+        echo "This script requires root privileges. Trying to use sudo..."
+        if command -v sudo >/dev/null 2>&1; then
+            exec sudo "$0" "$@"
+            # If exec fails, the script will continue as non-root
+            echo "Failed to obtain root privileges using sudo."
+            echo "Please run this script as root or with sudo manually."
+            exit 1
+        else
+            echo "sudo command not found. Please run this script as root."
+            exit 1
+        fi
+    fi
+fi
 
 cat << "EOF"
  ______                    _   _____           _        _ _           
@@ -177,9 +199,15 @@ fi
 # 1) Check for root / sudo permission
 ########################################
 if [ "$(id -u 2>/dev/null)" != "0" ]; then
-    echo "Please run this script as root (or with sudo)."
-    echo "Example: sudo sh install_zapret.sh"
-    exit 1
+    # Check if this is OpenWrt (which typically doesn't have sudo)
+    if [ -f "/etc/openwrt_release" ] || grep -q 'OpenWrt' /etc/os-release 2>/dev/null; then
+        echo "Warning: Running without root on OpenWrt. Some operations may fail."
+        echo "It's recommended to run this script as root on OpenWrt."
+    else
+        echo "Error: This script must be run as root (or with sudo)."
+        echo "Please run: sudo sh install_zapret.sh"
+        exit 1
+    fi
 fi
 
 ########################################

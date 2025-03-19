@@ -14,8 +14,11 @@ A universal installer script for the [Zapret](https://github.com/bol-van/zapret)
 Run the following command in your terminal:
 
 ```bash
-sudo sh -c "$(curl -sSL https://raw.githubusercontent.com/gorlev/zapret-easy-installer/main/install_zapret.sh)"
+sh -c "$(curl -sSL https://raw.githubusercontent.com/gorlev/zapret-easy-installer/main/install_zapret.sh)"
 ```
+
+> **Note for OpenWrt users**: The command will work directly as shown above!  
+> **Note for Linux/macOS users**: The script will automatically use sudo if needed and may prompt for your password.
 
 ### Windows
 
