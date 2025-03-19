@@ -22,7 +22,10 @@ if [ "$(id -u 2>/dev/null)" != "0" ]; then
         # Not OpenWrt, so we need root. Try to use sudo to re-execute this script
         echo "This script requires root privileges. Trying to use sudo..."
         if command -v sudo >/dev/null 2>&1; then
-            exec sudo "$0" "$@"
+            # Instead of trying to re-exec the current script (which doesn't work with curl-piped scripts),
+            # we download and execute the script in a single sudo command
+            echo "Executing with sudo..."
+            exec sudo sh -c "$(curl -sSL https://raw.githubusercontent.com/gorlev/zapret-easy-installer/main/install_zapret.sh)"
             # If exec fails, the script will continue as non-root
             echo "Failed to obtain root privileges using sudo."
             echo "Please run this script as root or with sudo manually."

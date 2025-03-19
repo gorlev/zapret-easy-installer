@@ -18,7 +18,7 @@ sh -c "$(curl -sSL https://raw.githubusercontent.com/gorlev/zapret-easy-installe
 ```
 
 > **Note for OpenWrt users**: The command will work directly as shown above!  
-> **Note for Linux/macOS users**: The script will automatically use sudo if needed and may prompt for your password.
+> **Note for Linux/macOS users**: The script will automatically use sudo if needed and prompt for your password. After entering your password, installation will continue automatically - no need to paste the command again.
 
 ### Windows
 
