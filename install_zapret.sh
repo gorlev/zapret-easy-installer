@@ -1,469 +1,456 @@
 #!/bin/sh
 #
-# Zapret Easy Installer Script
-# Supports: OpenWrt, Linux, macOS, Windows (via separate installer)
-# Features:
-# - Self-elevating (handles OpenWrt without sudo and other systems with sudo)
-# - Checks for root/admin privileges
-# - Installs curl if not available
-# - Detects OS type (OpenWrt, Linux, macOS, Windows)
-# - Downloads appropriate Zapret package for detected OS
-# - Verifies downloaded file with checksum
-# - Extracts and installs the package
-# - Cleans up after installation
+# Zapret Easy Installer for Linux, OpenWrt and macOS
+# https://github.com/gorlev/zapret-easy-installer
+#
+# Downloads the latest official release of zapret or zapret2
+# (https://github.com/bol-van), verifies the bundled binaries against the
+# release's sha256sum.txt and runs the official interactive installer
+# (install_easy.sh).
+#
+# Usage:
+#   U=https://raw.githubusercontent.com/gorlev/zapret-easy-installer/main/install_zapret.sh
+#   sh -c "$(curl -fsSL $U 2>/dev/null || wget -qO- $U)"
+#   sh install_zapret.sh [--flavor 1|2] [--version TAG] [--blockcheck|--no-blockcheck] [--keep-files]
+#
+# Environment variables (same meaning as the flags):
+#   ZAPRET_FLAVOR=1|2  ZAPRET_VERSION=TAG  ZAPRET_BLOCKCHECK=1|0  ZAPRET_KEEP_FILES=1
 #
 
-# Self-elevation mechanism - try to run as root if not already
-if [ "$(id -u 2>/dev/null)" != "0" ]; then
-    # Check if this is OpenWrt (which typically doesn't have sudo)
-    if [ -f "/etc/openwrt_release" ] || grep -q 'OpenWrt' /etc/os-release 2>/dev/null; then
-        echo "OpenWrt detected, continuing without sudo..."
-    else
-        # Not OpenWrt, so we need root. Try to use sudo to re-execute this script
-        echo "This script requires root privileges. Trying to use sudo..."
-        if command -v sudo >/dev/null 2>&1; then
-            # Instead of trying to re-exec the current script (which doesn't work with curl-piped scripts),
-            # we download and execute the script in a single sudo command
-            echo "Executing with sudo..."
-            exec sudo sh -c "$(curl -sSL https://raw.githubusercontent.com/gorlev/zapret-easy-installer/main/install_zapret.sh)"
-            # If exec fails, the script will continue as non-root
-            echo "Failed to obtain root privileges using sudo."
-            echo "Please run this script as root or with sudo manually."
-            exit 1
-        else
-            echo "sudo command not found. Please run this script as root."
-            exit 1
-        fi
-    fi
+INSTALLER_URL="https://raw.githubusercontent.com/gorlev/zapret-easy-installer/main/install_zapret.sh"
+INSTALLER_NAME="zapret-easy-installer"
+
+FLAVOR="${ZAPRET_FLAVOR:-}"
+VERSION="${ZAPRET_VERSION:-}"
+BLOCKCHECK="${ZAPRET_BLOCKCHECK:-}"
+KEEP_FILES="${ZAPRET_KEEP_FILES:-0}"
+WORK_DIR=""
+
+########################################
+# Output helpers
+########################################
+if [ -t 1 ]; then
+    C_RED="$(printf '\033[31m')"; C_GRN="$(printf '\033[32m')"
+    C_YLW="$(printf '\033[33m')"; C_CYN="$(printf '\033[36m')"
+    C_BLD="$(printf '\033[1m')";  C_RST="$(printf '\033[0m')"
+else
+    C_RED=""; C_GRN=""; C_YLW=""; C_CYN=""; C_BLD=""; C_RST=""
 fi
 
-cat << "EOF"
- ______                    _   _____           _        _ _           
-|___  /                   | | |_   _|         | |      | | |          
-   / / __ _ _ __  _ __ ___| |_  | |  _ __  ___| |_ __ _| | | ___ _ __ 
-  / / / _` | '_ \| '__/ _ \ __| | | | '_ \/ __| __/ _` | | |/ _ \ '__|
- / /_| (_| | |_) | | |  __/ |_ _| |_| | | \__ \ || (_| | | |  __/ |   
-/_____\__,_| .__/|_|  \___|\__|_____|_| |_|___/\__\__,_|_|_|\___|_|   
-           | |                                                        
-           |_|                                                        
-  
-Zapret Easy Installer
-https://github.com/gorlev/zapret-easy-installer
-EOF
-echo
+info()  { printf '%s==>%s %s\n' "$C_CYN" "$C_RST" "$*"; }
+ok()    { printf '%s[OK]%s %s\n' "$C_GRN" "$C_RST" "$*"; }
+warn()  { printf '%s[WARN]%s %s\n' "$C_YLW" "$C_RST" "$*" >&2; }
+die()   { printf '%s[ERROR]%s %s\n' "$C_RED" "$C_RST" "$*" >&2; exit 1; }
 
-# Function to install curl
-install_curl() {
-    echo "curl not found. Attempting to install..."
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update && apt-get install -y curl
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y curl
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y curl
-    elif command -v opkg >/dev/null 2>&1; then
-        opkg update && opkg install curl
-    elif command -v pacman >/dev/null 2>&1; then
-        pacman -Sy curl --noconfirm
-    elif command -v brew >/dev/null 2>&1; then
-        brew install curl
-    else
-        echo "ERROR: Could not install curl. Please install curl manually and try again."
-        exit 1
-    fi
-    
-    # Verify curl was installed
-    if ! command -v curl >/dev/null 2>&1; then
-        echo "ERROR: Failed to install curl. Please install curl manually and try again."
-        exit 1
-    fi
-    
-    echo "curl has been installed successfully!"
+usage() {
+    cat <<EOF
+Zapret Easy Installer
+
+Usage: sh install_zapret.sh [options]
+
+Options:
+  --flavor 1|2       1 = zapret (stable, recommended), 2 = zapret2 (Lua based, advanced)
+  --version TAG      install a specific release tag (e.g. v72.13) instead of the latest
+  --blockcheck       run blockcheck before installing (find a working strategy)
+  --no-blockcheck    skip the blockcheck question
+  --keep-files       keep the downloaded files in the temporary directory
+  -h, --help         show this help
+
+Environment: ZAPRET_FLAVOR, ZAPRET_VERSION, ZAPRET_BLOCKCHECK, ZAPRET_KEEP_FILES
+EOF
 }
 
-# Check if curl is installed, try to install if not
-if ! command -v curl >/dev/null 2>&1; then
+########################################
+# Arguments
+########################################
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --flavor)        [ $# -ge 2 ] || die "--flavor needs a value (1 or 2)"; FLAVOR="$2"; shift 2 ;;
+        --flavor=*)      FLAVOR="${1#*=}"; shift ;;
+        --version)       [ $# -ge 2 ] || die "--version needs a value"; VERSION="$2"; shift 2 ;;
+        --version=*)     VERSION="${1#*=}"; shift ;;
+        --blockcheck)    BLOCKCHECK=1; shift ;;
+        --no-blockcheck) BLOCKCHECK=0; shift ;;
+        --keep-files)    KEEP_FILES=1; shift ;;
+        -h|--help)       usage; exit 0 ;;
+        *)               warn "Unknown option: $1"; usage; exit 1 ;;
+    esac
+done
+
+case "$FLAVOR" in
+    ""|1|2) ;;
+    zapret)  FLAVOR=1 ;;
+    zapret2) FLAVOR=2 ;;
+    *) die "Invalid flavor '$FLAVOR'. Use 1 (zapret) or 2 (zapret2)." ;;
+esac
+
+########################################
+# Interactive input (works even when stdin is a pipe)
+########################################
+TTY=""
+if [ -t 0 ]; then
+    TTY="/dev/stdin"
+elif (: </dev/tty) 2>/dev/null; then
+    TTY="/dev/tty"
+fi
+
+# ask "question" default(Y|N) -> returns 0 for yes
+ask() {
+    _q="$1"; _def="$2"
+    if [ -z "$TTY" ]; then
+        [ "$_def" = "Y" ]; return
+    fi
+    if [ "$_def" = "Y" ]; then _hint="[Y/n]"; else _hint="[y/N]"; fi
+    printf '%s %s ' "$_q" "$_hint"
+    read -r _ans <"$TTY" || _ans=""
+    case "$_ans" in
+        [Yy]*) return 0 ;;
+        [Nn]*) return 1 ;;
+        *)     [ "$_def" = "Y" ] ;;
+    esac
+}
+
+is_openwrt() {
+    [ -f /etc/openwrt_release ] || grep -q 'OpenWrt' /etc/os-release 2>/dev/null
+}
+
+########################################
+# 1) Root privileges
+########################################
+if [ "$(id -u 2>/dev/null)" != "0" ]; then
+    if is_openwrt; then
+        die "Please run this script as root on OpenWrt."
+    fi
+    command -v sudo >/dev/null 2>&1 || die "This script needs root privileges and sudo was not found. Run it as root."
+
+    # Forward the chosen options to the elevated copy.
+    set --
+    [ -n "$FLAVOR" ]     && set -- "$@" --flavor "$FLAVOR"
+    [ -n "$VERSION" ]    && set -- "$@" --version "$VERSION"
+    [ "$BLOCKCHECK" = 1 ] && set -- "$@" --blockcheck
+    [ "$BLOCKCHECK" = 0 ] && set -- "$@" --no-blockcheck
+    [ "$KEEP_FILES" = 1 ] && set -- "$@" --keep-files
+
+    info "Root privileges are required. Re-running with sudo..."
+    if [ -f "$0" ] && grep -q "$INSTALLER_NAME" "$0" 2>/dev/null; then
+        # Started from a local file: re-run that same file.
+        exec sudo sh "$0" "$@"
+    fi
+    # Started via sh -c "$(curl ...)": fetch the installer again for the root shell.
+    if command -v curl >/dev/null 2>&1; then
+        _self="$(curl -fsSL "$INSTALLER_URL")" || die "Could not download the installer."
+    elif command -v wget >/dev/null 2>&1; then
+        _self="$(wget -qO- "$INSTALLER_URL")" || die "Could not download the installer."
+    else
+        die "Neither curl nor wget is available."
+    fi
+    exec sudo sh -c "$_self" "$INSTALLER_NAME" "$@"
+fi
+
+cat <<'EOF'
+ ______                    _     _____
+|___  /                   | |   |  ___|
+   / / __ _ _ __  _ __ ___| |_  | |__  __ _ ___ _   _
+  / / / _` | '_ \| '__/ _ \ __| |  __|/ _` / __| | | |
+./ /_| (_| | |_) | | |  __/ |_  | |__| (_| \__ \ |_| |
+\_____\__,_| .__/|_|  \___|\__| \____/\__,_|___/\__, |
+           | |                                   __/ |
+           |_|          Easy Installer          |___/
+EOF
+echo "https://github.com/gorlev/zapret-easy-installer"
+echo
+
+########################################
+# 2) Detect the system
+########################################
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
+PLATFORM=""
+
+if is_openwrt; then
+    PLATFORM="openwrt"
+elif [ "$OS" = "linux" ]; then
+    PLATFORM="linux"
+elif [ "$OS" = "darwin" ]; then
+    PLATFORM="macos"
+else
+    case "$OS" in
+        mingw*|msys*|cygwin*)
+            die "Windows detected. Please use install_zapret.bat or install_zapret.ps1 instead." ;;
+        *)
+            die "Unsupported system: $OS. zapret's easy installer supports Linux, OpenWrt and macOS." ;;
+    esac
+fi
+
+info "Detected system: $PLATFORM ($ARCH)"
+
+########################################
+# 3) Downloader (curl or wget)
+########################################
+install_curl() {
+    warn "Neither curl nor wget was found. Trying to install curl..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update && apt-get install -y curl
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y curl
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y curl
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm curl
+    elif command -v zypper >/dev/null 2>&1; then
+        zypper --non-interactive install curl
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache curl
+    elif command -v opkg >/dev/null 2>&1; then
+        opkg update && opkg install curl
+    fi
+    command -v curl >/dev/null 2>&1 || die "Could not install curl. Please install curl (or wget) manually and try again."
+    ok "curl installed."
+}
+
+if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
     install_curl
 fi
 
-# Detect Windows and run separate installer
-if [ "$(uname -s 2>/dev/null)" = "Windows_NT" ] || [ -n "$WINDIR" ] || [ -n "$windir" ]; then
-    echo "Windows detected. Creating and running Windows-specific installer..."
-    # Create PowerShell script in temp directory
-    cat << 'EOF' > ./zapret_installer.ps1
-# Zapret Windows Installer
-Write-Host "Starting Zapret Windows installer..." -ForegroundColor Green
-
-# Check for admin rights
-if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-    Write-Warning "This script requires Administrator privileges. Please run it as Administrator."
-    pause
-    exit
-}
-
-# Install curl if not present
-if (-NOT (Get-Command "curl.exe" -ErrorAction SilentlyContinue)) {
-    Write-Host "curl not found, installing via PowerShell..." -ForegroundColor Yellow
-    $ProgressPreference = 'SilentlyContinue'
-    Invoke-WebRequest -UseBasicParsing -Uri https://curl.se/windows/dl-7.88.1_5/curl-7.88.1_5-win64-mingw.zip -OutFile "$env:TEMP\curl.zip"
-    Expand-Archive -Path "$env:TEMP\curl.zip" -DestinationPath "$env:TEMP\curl" -Force
-    Copy-Item "$env:TEMP\curl\curl-7.88.1_5-win64-mingw\bin\curl.exe" -Destination "$env:SystemRoot\System32" -Force
-}
-
-# Create download directory
-$downloadDir = "$env:USERPROFILE\Downloads"
-$extractDir = "$downloadDir\zapret"
-if (-NOT (Test-Path $extractDir)) {
-    New-Item -ItemType Directory -Path $extractDir | Out-Null
-}
-
-# Get latest release info
-Write-Host "Fetching latest Zapret release information..." -ForegroundColor Cyan
-$apiUrl = "https://api.github.com/repos/bol-van/zapret/releases/latest"
-$releaseInfo = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing
-
-# Find Windows zipfile
-$zipAsset = $releaseInfo.assets | Where-Object { $_.name -like "*.zip" -and $_.name -notlike "*Source*" } | Select-Object -First 1
-if (-NOT $zipAsset) {
-    Write-Host "ERROR: Could not find Windows ZIP file in the latest release." -ForegroundColor Red
-    pause
-    exit
-}
-
-$zipUrl = $zipAsset.browser_download_url
-$zipFile = Join-Path $downloadDir $zipAsset.name
-Write-Host "Downloading: $zipUrl" -ForegroundColor Cyan
-
-# Download ZIP file
-Invoke-WebRequest -Uri $zipUrl -OutFile $zipFile -UseBasicParsing
-
-# Find sha256sum file
-$shaAsset = $releaseInfo.assets | Where-Object { $_.name -eq "sha256sum.txt" } | Select-Object -First 1
-if (-NOT $shaAsset) {
-    Write-Host "WARNING: Could not find checksum file. Proceeding without verification." -ForegroundColor Yellow
-} else {
-    $shaUrl = $shaAsset.browser_download_url
-    $shaFile = Join-Path $downloadDir "sha256sum.txt"
-    Write-Host "Downloading checksum: $shaUrl" -ForegroundColor Cyan
-    Invoke-WebRequest -Uri $shaUrl -OutFile $shaFile -UseBasicParsing
-    
-    # Verify checksum
-    Write-Host "Verifying file integrity..." -ForegroundColor Cyan
-    $expectedHash = Get-Content $shaFile | Where-Object { $_ -like "*$($zipAsset.name)*" } | ForEach-Object { ($_ -split '\s+')[0] }
-    if ($expectedHash) {
-        $actualHash = (Get-FileHash -Algorithm SHA256 $zipFile).Hash.ToLower()
-        if ($actualHash -ne $expectedHash.ToLower()) {
-            Write-Host "ERROR: Checksum verification failed! Expected: $expectedHash, Got: $actualHash" -ForegroundColor Red
-            pause
-            exit
-        }
-        Write-Host "Checksum verification passed." -ForegroundColor Green
-    } else {
-        Write-Host "WARNING: Could not find checksum for ZIP file. Proceeding without verification." -ForegroundColor Yellow
-    }
-}
-
-# Extract ZIP file
-Write-Host "Extracting archive..." -ForegroundColor Cyan
-Expand-Archive -Path $zipFile -DestinationPath $extractDir -Force
-
-# Find extracted folder
-$extractedFolders = Get-ChildItem -Path $extractDir -Directory
-if ($extractedFolders.Count -eq 0) {
-    Write-Host "ERROR: No folders found in extracted ZIP." -ForegroundColor Red
-    pause
-    exit
-}
-$zapretFolder = $extractedFolders[0].FullName
-
-# Run windows installer if exists
-$winInstaller = Join-Path $zapretFolder "install_win.bat"
-if (Test-Path $winInstaller) {
-    Write-Host "Running Windows installer..." -ForegroundColor Green
-    Set-Location $zapretFolder
-    Start-Process -FilePath $winInstaller -Wait -NoNewWindow
-} else {
-    Write-Host "ERROR: Windows installer (install_win.bat) not found in extracted files." -ForegroundColor Red
-    Write-Host "Please check the Zapret documentation for manual installation." -ForegroundColor Yellow
-}
-
-Write-Host "`nZapret installation completed!" -ForegroundColor Green
-Write-Host "Extracted files are located at: $zapretFolder" -ForegroundColor Cyan
-Write-Host "You can delete downloaded files from $downloadDir if installation was successful." -ForegroundColor Cyan
-pause
-EOF
-
-    # Run the PowerShell script
-    powershell -ExecutionPolicy Bypass -File ./zapret_installer.ps1
-    exit 0
-fi
-
-########################################
-# 1) Check for root / sudo permission
-########################################
-if [ "$(id -u 2>/dev/null)" != "0" ]; then
-    # Check if this is OpenWrt (which typically doesn't have sudo)
-    if [ -f "/etc/openwrt_release" ] || grep -q 'OpenWrt' /etc/os-release 2>/dev/null; then
-        echo "Warning: Running without root on OpenWrt. Some operations may fail."
-        echo "It's recommended to run this script as root on OpenWrt."
+# fetch URL -> stdout
+fetch() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 3 "$1"
     else
-        echo "Error: This script must be run as root (or with sudo)."
-        echo "Please run: sudo sh install_zapret.sh"
-        exit 1
+        wget -qO- "$1"
     fi
-fi
+}
 
-########################################
-# 2) Detect OS, vendor
-########################################
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"   # e.g. linux, darwin, freebsd
-ARCH="$(uname -m)"
-OS_VENDOR=""
-
-if [ -f "/etc/os-release" ]; then
-    . /etc/os-release
-    OS_VENDOR="$ID"  # e.g. ubuntu, debian, openwrt, etc.
-fi
-
-# Special check for OpenWrt
-if [ -f "/etc/openwrt_release" ]; then
-    OS_VENDOR="openwrt"
-fi
-
-echo "System detection:"
-echo "  OS       = $OS"
-echo "  ARCH     = $ARCH"
-[ -n "$OS_VENDOR" ] && echo "  VENDOR   = $OS_VENDOR"
-echo
-
-########################################
-# 3) Set up directories based on OS
-########################################
-if [ "$OS_VENDOR" = "openwrt" ]; then
-    DOWNLOAD_DIR="/tmp"
-    EXTRACT_DIR="/tmp/zapret"
-    echo "Using OpenWrt paths: $DOWNLOAD_DIR and $EXTRACT_DIR"
-elif [ "$OS" = "darwin" ]; then
-    DOWNLOAD_DIR="$HOME/Downloads"
-    EXTRACT_DIR="$HOME/Downloads/zapret"
-    echo "Using macOS paths: $DOWNLOAD_DIR and $EXTRACT_DIR"
-else
-    # For Linux
-    DOWNLOAD_DIR="/tmp"
-    EXTRACT_DIR="/tmp/zapret"
-    echo "Using Linux paths: $DOWNLOAD_DIR and $EXTRACT_DIR"
-fi
-
-# Create directories
-mkdir -p "$DOWNLOAD_DIR" "$EXTRACT_DIR"
-
-########################################
-# 4) Fetch the latest release info from GitHub
-########################################
-GH_API_URL="https://api.github.com/repos/bol-van/zapret/releases/latest"
-echo "Fetching latest release info from GitHub: $GH_API_URL"
-
-LATEST_JSON="$(curl -sSL "$GH_API_URL")"
-if [ -z "$LATEST_JSON" ]; then
-    echo "ERROR: Could not retrieve data from GitHub API. Please check your connection."
-    exit 1
-fi
-
-# Extract version number for better asset filtering
-VERSION="$(echo "$LATEST_JSON" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')"
-echo "Latest version: $VERSION"
-
-########################################
-# 5) Find the correct asset based on OS
-########################################
-TARBALL_URL=""
-if [ "$OS_VENDOR" = "openwrt" ]; then
-    # Look for OpenWrt embedded tarball
-    echo "Looking for OpenWrt specific package..."
-    TARBALL_URL="$(echo "$LATEST_JSON" \
-        | grep "browser_download_url" \
-        | grep "openwrt" \
-        | grep "embedded" \
-        | grep "tar.gz" \
-        | cut -d '"' -f 4 \
-        | head -n1)"
-elif [ "$OS" = "darwin" ]; then
-    # For macOS, get the regular tarball
-    echo "Looking for macOS compatible package..."
-    TARBALL_URL="$(echo "$LATEST_JSON" \
-        | grep "browser_download_url" \
-        | grep "tar.gz" \
-        | grep -v "openwrt" \
-        | grep -v "embedded" \
-        | grep -v "Source" \
-        | cut -d '"' -f 4 \
-        | head -n1)"
-else
-    # For Linux
-    echo "Looking for Linux compatible package..."
-    TARBALL_URL="$(echo "$LATEST_JSON" \
-        | grep "browser_download_url" \
-        | grep "tar.gz" \
-        | grep -v "openwrt" \
-        | grep -v "embedded" \
-        | grep -v "Source" \
-        | cut -d '"' -f 4 \
-        | head -n1)"
-fi
-
-if [ -z "$TARBALL_URL" ]; then
-    echo "ERROR: Could not find a suitable package for this system."
-    echo "Please check: https://github.com/bol-van/zapret/releases"
-    exit 1
-fi
-
-########################################
-# 6) Find sha256sum.txt
-########################################
-SHA256SUM_URL="$(echo "$LATEST_JSON" \
-    | grep "browser_download_url" \
-    | grep "sha256sum.txt" \
-    | cut -d '"' -f 4 \
-    | head -n1)"
-
-if [ -z "$SHA256SUM_URL" ]; then
-    echo "WARNING: No sha256sum.txt found in the release assets."
-    echo "Proceeding without checksum verification."
-fi
-
-echo "Download URLs:"
-echo "  PACKAGE     = $TARBALL_URL"
-[ -n "$SHA256SUM_URL" ] && echo "  SHA256SUM   = $SHA256SUM_URL"
-echo
-
-########################################
-# 7) Download the package and sha256sum.txt
-########################################
-cd "$DOWNLOAD_DIR" || exit 1
-TARBALL_FILE="$(basename "$TARBALL_URL")"
-
-echo "Downloading: $TARBALL_FILE"
-if ! curl -sSLO "$TARBALL_URL"; then
-    echo "ERROR: Failed to download $TARBALL_URL"
-    exit 1
-fi
-
-if [ ! -f "$TARBALL_FILE" ]; then
-    echo "ERROR: Downloaded file not found: $TARBALL_FILE"
-    exit 1
-fi
-
-# Download SHA256SUM file if available
-if [ -n "$SHA256SUM_URL" ]; then
-    SUM_FILE="$(basename "$SHA256SUM_URL")"
-    echo "Downloading: $SUM_FILE"
-    
-    if ! curl -sSLO "$SHA256SUM_URL"; then
-        echo "WARNING: Failed to download SHA256SUM file. Proceeding without verification."
-    elif [ ! -f "$SUM_FILE" ]; then
-        echo "WARNING: Downloaded SHA256SUM file not found. Proceeding without verification."
-    fi
-fi
-
-########################################
-# 8) Verify checksum if available
-########################################
-if [ -f "$SUM_FILE" ]; then
-    echo "Verifying checksum for $TARBALL_FILE..."
-    
-    # Extract expected checksum for our file
-    EXPECTED_SUM=$(grep "$TARBALL_FILE" "$SUM_FILE" | cut -d ' ' -f 1)
-    if [ -z "$EXPECTED_SUM" ]; then
-        echo "WARNING: Could not find checksum for $TARBALL_FILE in $SUM_FILE."
-        echo "Proceeding without verification."
-    else
-        # Calculate actual checksum
-        if command -v sha256sum >/dev/null 2>&1; then
-            ACTUAL_SUM=$(sha256sum "$TARBALL_FILE" | cut -d ' ' -f 1)
-        elif command -v shasum >/dev/null 2>&1; then
-            ACTUAL_SUM=$(shasum -a 256 "$TARBALL_FILE" | cut -d ' ' -f 1)
+# download URL FILE
+download() {
+    if command -v curl >/dev/null 2>&1; then
+        if [ -t 2 ]; then
+            curl -fSL --retry 3 --progress-bar -o "$2" "$1"
         else
-            echo "WARNING: Neither sha256sum nor shasum found. Skipping verification."
-            ACTUAL_SUM=""
+            curl -fsSL --retry 3 -o "$2" "$1"
         fi
-        
-        # Compare checksums
-        if [ -n "$ACTUAL_SUM" ]; then
-            if [ "$ACTUAL_SUM" = "$EXPECTED_SUM" ]; then
-                echo "Checksum verification PASSED!"
+    else
+        wget -q -O "$2" "$1"
+    fi
+}
+
+########################################
+# 4) Choose zapret or zapret2
+########################################
+if [ "$PLATFORM" = "macos" ]; then
+    if [ "$FLAVOR" = "2" ]; then
+        warn "zapret2 does not support macOS. Installing zapret (v1) instead."
+    fi
+    FLAVOR=1
+fi
+
+if [ -z "$FLAVOR" ]; then
+    echo
+    printf '%sWhich version do you want to install?%s\n' "$C_BLD" "$C_RST"
+    echo "  1) zapret   - stable and mature, best choice for most users (recommended)"
+    echo "  2) zapret2  - next generation, strategies are Lua scripts; for advanced users"
+    echo
+    if [ -n "$TTY" ]; then
+        printf 'Enter choice [1]: '
+        read -r _choice <"$TTY" || _choice=""
+    else
+        _choice=""
+    fi
+    case "$_choice" in
+        2) FLAVOR=2 ;;
+        ""|1) FLAVOR=1 ;;
+        *) die "Invalid choice: $_choice" ;;
+    esac
+fi
+
+if [ "$FLAVOR" = "2" ]; then
+    PROJECT="zapret2"
+    OTHER_PROJECT="zapret"
+    BLOCKCHECK_SCRIPT="blockcheck2.sh"
+else
+    PROJECT="zapret"
+    OTHER_PROJECT="zapret2"
+    BLOCKCHECK_SCRIPT="blockcheck.sh"
+fi
+REPO="bol-van/$PROJECT"
+info "Selected: $PROJECT (https://github.com/$REPO)"
+
+if [ -x "/opt/$OTHER_PROJECT/uninstall_easy.sh" ]; then
+    echo
+    warn "$OTHER_PROJECT is already installed in /opt/$OTHER_PROJECT."
+    warn "Running zapret and zapret2 at the same time makes their firewall rules conflict."
+    if ask "Uninstall $OTHER_PROJECT first?" N; then
+        /opt/"$OTHER_PROJECT"/uninstall_easy.sh <"${TTY:-/dev/null}" || warn "Uninstalling $OTHER_PROJECT failed. Continuing anyway."
+    fi
+fi
+
+########################################
+# 5) Resolve the release tag
+########################################
+if [ -z "$VERSION" ]; then
+    info "Looking up the latest $PROJECT release..."
+    _json="$(fetch "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null)"
+    VERSION="$(printf '%s\n' "$_json" | grep '"tag_name"' | head -n1 | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
+
+    if [ -z "$VERSION" ] && command -v curl >/dev/null 2>&1; then
+        # API unavailable or rate limited: follow the /releases/latest redirect instead.
+        _url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null)"
+        case "$_url" in
+            */releases/tag/*) VERSION="${_url##*/}" ;;
+        esac
+    fi
+    [ -n "$VERSION" ] || die "Could not determine the latest release. Check your connection or pass --version TAG."
+fi
+
+case "$VERSION" in
+    *[!A-Za-z0-9._-]*) die "Invalid version tag: $VERSION" ;;
+esac
+ok "Release: $PROJECT $VERSION"
+
+if [ "$PLATFORM" = "openwrt" ]; then
+    ASSET="$PROJECT-$VERSION-openwrt-embedded.tar.gz"
+else
+    ASSET="$PROJECT-$VERSION.tar.gz"
+fi
+BASE_URL="https://github.com/$REPO/releases/download/$VERSION"
+
+########################################
+# 6) Download
+########################################
+cleanup() {
+    if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
+        if [ "$KEEP_FILES" = "1" ]; then
+            info "Downloaded files kept in $WORK_DIR"
+        else
+            cd / && rm -rf "$WORK_DIR"
+        fi
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zapret-installer.XXXXXX")" || die "Could not create a temporary directory."
+cd "$WORK_DIR" || die "Could not enter $WORK_DIR"
+
+info "Downloading $ASSET..."
+download "$BASE_URL/$ASSET" "$ASSET" || die "Download failed: $BASE_URL/$ASSET"
+
+HAVE_SUMS=0
+if download "$BASE_URL/sha256sum.txt" sha256sum.txt 2>/dev/null; then
+    HAVE_SUMS=1
+else
+    warn "sha256sum.txt is not available for this release. Binaries cannot be verified."
+fi
+
+########################################
+# 7) Extract
+########################################
+info "Extracting..."
+tar -xzf "$ASSET" || die "Could not extract $ASSET"
+
+SRC_DIR="$WORK_DIR/$PROJECT-$VERSION"
+[ -f "$SRC_DIR/install_easy.sh" ] || die "Unexpected archive layout: $SRC_DIR/install_easy.sh not found."
+
+########################################
+# 8) Verify binaries
+########################################
+# sha256sum.txt lists the binaries inside the archive (not the archive itself),
+# e.g. "<hash>  zapret-v72.13/binaries/linux-x86_64/nfqws".
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d ' ' -f 1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | cut -d ' ' -f 1
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "$1" | sed 's/.*= *//'
+    fi
+}
+
+if [ "$HAVE_SUMS" = "1" ]; then
+    if [ -z "$(sha256_of sha256sum.txt)" ]; then
+        warn "No SHA-256 tool (sha256sum, shasum or openssl) found. Skipping verification."
+    else
+        info "Verifying binaries against sha256sum.txt..."
+        _checked=0; _failed=0
+        while read -r _hash _path; do
+            [ -n "$_hash" ] && [ -n "$_path" ] || continue
+            _path="${_path#\*}"
+            case "$_path" in
+                "$PROJECT-$VERSION"/*) ;;
+                *) continue ;;
+            esac
+            [ -f "$_path" ] || continue   # the OpenWrt package ships only a subset
+            if [ "$(sha256_of "$_path")" = "$_hash" ]; then
+                _checked=$((_checked + 1))
             else
-                echo "ERROR: Checksum verification FAILED!"
-                echo "Expected: $EXPECTED_SUM"
-                echo "Actual:   $ACTUAL_SUM"
-                echo "Aborting installation due to integrity failure."
-                exit 1
+                warn "Checksum mismatch: $_path"
+                _failed=$((_failed + 1))
             fi
+        done < sha256sum.txt
+
+        if [ "$_failed" -gt 0 ]; then
+            die "$_failed binaries failed verification. The download may be corrupted or tampered with. Aborting."
+        elif [ "$_checked" -eq 0 ]; then
+            warn "No binaries could be matched against sha256sum.txt."
+        else
+            ok "$_checked binaries verified."
         fi
     fi
 fi
 
 ########################################
-# 9) Extract package to temporary directory
+# 9) Prepare binaries and (optionally) run blockcheck
 ########################################
-echo "Extracting archive: $TARBALL_FILE to $EXTRACT_DIR"
-mkdir -p "$EXTRACT_DIR"
-tar -xzf "$TARBALL_FILE" -C "$EXTRACT_DIR"
+cd "$SRC_DIR" || die "Could not enter $SRC_DIR"
 
-# Find the top-level directory in the extracted archive
-ARCHIVE_DIR=$(find "$EXTRACT_DIR" -maxdepth 1 -type d | grep -v "^$EXTRACT_DIR$" | head -1)
-if [ -z "$ARCHIVE_DIR" ]; then
-    echo "ERROR: Could not find extracted directory."
-    exit 1
+info "Installing binaries for this architecture (install_bin.sh)..."
+sh ./install_bin.sh || die "install_bin.sh failed. Your architecture may not be supported by the prebuilt binaries."
+
+if [ -f "./$BLOCKCHECK_SCRIPT" ]; then
+    if [ -z "$BLOCKCHECK" ]; then
+        echo
+        echo "blockcheck tests your connection and finds DPI bypass strategies that work with your ISP."
+        echo "Recommended on first install: you can enter the strategy it finds when the installer asks"
+        echo "\"do you want to edit the options\". It can take a while. Stop other DPI bypass tools first."
+        if ask "Run blockcheck now?" N; then BLOCKCHECK=1; else BLOCKCHECK=0; fi
+    fi
+    if [ "$BLOCKCHECK" = "1" ]; then
+        info "Running $BLOCKCHECK_SCRIPT..."
+        sh "./$BLOCKCHECK_SCRIPT" <"${TTY:-/dev/null}" || warn "blockcheck exited with an error."
+        echo
+        if [ -n "$TTY" ]; then
+            printf 'Note the working strategy above, then press Enter to continue with the installation...'
+            read -r _dummy <"$TTY" || true
+        fi
+    fi
 fi
 
-echo "Extracted to: $ARCHIVE_DIR"
-
 ########################################
-# 10) Run the installation scripts
-########################################
-cd "$ARCHIVE_DIR" || {
-    echo "ERROR: Cannot access $ARCHIVE_DIR"
-    exit 1
-}
-
-# Check if the required install scripts exist
-if [ ! -f "install_bin.sh" ] || [ ! -f "install_prereq.sh" ] || [ ! -f "install_easy.sh" ]; then
-    echo "ERROR: One or more installation scripts not found."
-    echo "Please check the extracted files in $ARCHIVE_DIR"
-    exit 1
-fi
-
-# Make scripts executable
-chmod +x install_bin.sh install_prereq.sh install_easy.sh
-
-echo "==> Running install_bin.sh..."
-./install_bin.sh
-
-echo "==> Running install_prereq.sh..."
-./install_prereq.sh
-
-echo "==> Running install_easy.sh..."
-./install_easy.sh
-
-########################################
-# 11) Cleanup
+# 10) Official installer
 ########################################
 echo
-echo "Installation steps completed."
-
-# Ask if the user wants to clean up downloaded files
-printf "Do you want to clean up downloaded files? (y/n): "
-read -r CLEANUP
-if [ "$CLEANUP" = "y" ] || [ "$CLEANUP" = "Y" ]; then
-    echo "Cleaning up..."
-    cd /
-    rm -f "$DOWNLOAD_DIR/$TARBALL_FILE"
-    rm -f "$DOWNLOAD_DIR/$SUM_FILE"
-    rm -rf "$EXTRACT_DIR"
-    echo "Cleanup done."
+info "Starting the official installer (install_easy.sh)."
+info "Answer \"Y\" when it offers to copy itself to /opt/$PROJECT."
+echo
+if [ -n "$TTY" ]; then
+    sh ./install_easy.sh <"$TTY"
+else
+    sh ./install_easy.sh
 fi
+RC=$?
 
 echo
-echo "Zapret installation is complete!"
-echo "Thank you for using the Zapret Easy Installer."
-echo "Visit https://github.com/bol-van/zapret for more information about Zapret."
+if [ $RC -ne 0 ] || [ ! -f "/opt/$PROJECT/install_easy.sh" ]; then
+    die "The installation was not completed (install_easy.sh exit code $RC). Run the installer again to retry."
+fi
+
+ok "$PROJECT $VERSION is installed in /opt/$PROJECT"
+cat <<EOF
+
+Next steps:
+  Find a working strategy : /opt/$PROJECT/$BLOCKCHECK_SCRIPT
+  Edit the configuration  : /opt/$PROJECT/config   (then re-run /opt/$PROJECT/install_easy.sh)
+  Uninstall               : /opt/$PROJECT/uninstall_easy.sh
+
+Documentation: https://github.com/$REPO
+EOF
